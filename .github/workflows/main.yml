@@ -1,57 +1,217 @@
-build-cpp:
-  strategy:
-    matrix:
-      include:
-        - platform: windows-2022
-          arch: x64
-          qt_version: "6.5"
-    fail-fast: false
-  runs-on: ${{ matrix.platform }}
-  steps:
-    - name: Checking out sources
-      uses: actions/checkout@v3
-      with:
-        repository: MatsuriDayo/nekoray
-        ref: main
-        submodules: recursive
-    - name: Modify File
-      shell: pwsh
-      run: |
-        if (Test-Path "main\NekoGui_DataStore.hpp") { $content = Get-Content "main\NekoGui_DataStore.hpp" -Raw; if ($content -match "bool remember_enable = false;") { $content = $content -replace "bool remember_enable = false;", "bool remember_enable = true;"; $content | Set-Content "main\NekoGui_DataStore.hpp" -Force } }
-        # ... rest of your PowerShell script ...
-    - name: Install MSVC compiler
-      if: matrix.platform == 'windows-2022'
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: ${{ matrix.arch }}
-    - name: Windows - Download Custom Qt ${{ matrix.qt_version }} SDK
-      shell: bash
-      env:
-        DL_QT_VER: ${{ matrix.qt_version }}
-      run: |
-        echo "Downloading Qt SDK for version ${DL_QT_VER}"
-        bash ./libs/download_qtsdk_win.sh || echo "Download failed"
-    - name: Install ninja-build tool
-      uses: seanmiddleditch/gha-setup-ninja@master
-    - name: Windows - Generate MakeFile and Build
-      shell: bash
-      env:
-        DL_QT_VER: ${{ matrix.qt_version }}
-        CC: cl.exe
-        CXX: cl.exe
-      run: |
-        . ./libs/env_qtsdk.sh "$PWD/qtsdk/Qt" || echo "env_qtsdk.sh failed"
-        mkdir build || echo "mkdir failed"
-        cd build || echo "cd failed"
-        cmake -GNinja -DQT_VERSION_MAJOR=6 -DCMAKE_BUILD_TYPE=Release .. --verbose || echo "CMake failed"
-        ninja -j2 -v || echo "Ninja failed"
-        cd .. || echo "cd .. failed"
-        ./libs/deploy_windows64.sh || echo "Deploy failed"
-    - name: Tar files
-      shell: bash
-      run: tar czvf artifacts.tgz ./deployment || echo "Tar failed"
-    - name: Uploading Artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: NekoRay-${{ github.sha }}-${{ matrix.platform }}-${{ matrix.arch }}-Qt${{ matrix.qt_version }}
-        path: artifacts.tgz
+name: Nekoray build matrix - cmake (Windows Only)
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Run every day at midnight UTC
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish: If want ignore'
+        required: false
+      artifact-pack:
+        description: 'artifact-pack: If want ignore'
+        required: false
+
+jobs:
+  build-go:
+    strategy:
+      matrix:
+        cross_os: [ windows ]
+        cross_arch: [ amd64 ]
+        include:
+          - cross_os: public_res
+            cross_arch: public_res
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checking out sources
+        uses: actions/checkout@v4  # Updated to v4
+        with:
+          repository: MatsuriDayo/nekoray
+          ref: main
+          submodules: recursive
+      - name: Modify File
+        shell: bash
+        run: |
+          extraCode="\n        } else { \n            direct_ip = \"\";\n            direct_domain = \"\";\n            proxy_ip = \"\";\n            proxy_domain = \"\";\n            block_ip = \"\";\n            block_domain = \"\";"
+          sed -i 's/bool remember_enable = false;/bool remember_enable = true;/' main/NekoGui_DataStore.hpp
+          sed -i 's/QString direct_ip;/QString direct_ip = "geoip:cn\\ngeoip:private";/' main/NekoGui_DataStore.hpp
+          sed -i 's/QString direct_domain;/QString direct_domain = "geosite:cn";/' main/NekoGui_DataStore.hpp
+          sed -i 's/int language = 0;/int language = 2;/' main/NekoGui_DataStore.hpp
+          sed -i 's/int inbound_http_port = -2081;/int inbound_http_port = 2081;/' main/NekoGui_DataStore.hpp
+          sed -i 's/block_domain =/block_domain = "";/' main/NekoGui.cpp
+          sed -i '/geosite:category-ads-all/d' main/NekoGui.cpp
+          sed -i '/domain:/d' main/NekoGui.cpp
+          sed -i "/block_domain = \"\";/s/$/$extraCode/" main/NekoGui.cpp
+          sed -i 's|https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat|https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat|' libs/build_public_res.sh
+          sed -i 's|https://api.github.com/repos/MatsuriDayo/nekoray/releases|https://api.github.com/repos/autoxtls/nekoray-windows/releases|' go/grpc_server/update.go
+          sed -i 's|https://matsuricom.pages.dev/|https://autoxtls.github.io/|' ui/mainwindow.cpp
+      - name: Go Status
+        shell: bash
+        run: git ls-files go | xargs cat | sha1sum > go_status
+      - name: Cache Common Download
+        id: cache-common
+        uses: actions/cache@v4  # Updated to v4
+        with:
+          path: artifacts.tgz
+          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('libs/*.sh', 'go_status', '*.txt') }}
+      - name: Install Golang
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5  # Updated to v5
+        with:
+          go-version: '^1.21'
+      - name: Build golang parts
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross_os }}" != "public_res" ]; then
+            ./libs/get_source.sh
+            GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./libs/build_go.sh
+          else
+            ./libs/build_public_res.sh
+          fi
+      - name: Tar files
+        if: steps.cache-common.outputs.cache-hit != 'true'
+        shell: bash
+        run: tar czvf artifacts.tgz ./deployment
+      - name: Uploading Artifact
+        uses: actions/upload-artifact@v4  # Updated to v4
+        with:
+          name: NekoRay-${{ github.sha }}-Common-${{ matrix.cross_os }}-${{ matrix.cross_arch }}
+          path: artifacts.tgz
+
+  build-cpp:
+    strategy:
+      matrix:
+        include:
+          - platform: windows-2022
+            arch: x64
+            qt_version: "6.5"
+      fail-fast: false
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checking out sources
+        uses: actions/checkout@v4  # Updated to v4
+        with:
+          repository: MatsuriDayo/nekoray
+          ref: main
+          submodules: recursive
+      - name: Modify File
+        shell: pwsh  # Explicitly use PowerShell
+        run: |
+          if (Test-Path "main/NekoGui_DataStore.hpp") {
+            $content = Get-Content "main/NekoGui_DataStore.hpp" -Raw
+            $content = $content -replace "bool remember_enable = false;", "bool remember_enable = true;"
+            $content = $content -replace "QString direct_ip;", "QString direct_ip = `"geoip:cn`ngeoip:private`";"
+            $content = $content -replace "QString direct_domain;", "QString direct_domain = `"geosite:cn`";"
+            $content = $content -replace "int language = 0;", "int language = 2;"
+            $content = $content -replace "int inbound_http_port = -2081;", "int inbound_http_port = 2081;"
+            $content | Set-Content "main/NekoGui_DataStore.hpp" -Force
+          }
+          if (Test-Path "main/NekoGui.cpp") {
+            $content = Get-Content "main/NekoGui.cpp" -Raw
+            $content = $content -replace "block_domain =.*", "block_domain = `"`";"
+            $content = $content -replace ".*geosite:category-ads-all.*`n", ""
+            $content = $content -replace ".*domain:.*`n", ""
+            $extraCode = "`n        } else {`n            direct_ip = `"`";`n            direct_domain = `"`";`n            proxy_ip = `"`";`n            proxy_domain = `"`";`n            block_ip = `"`";`n            block_domain = `"`";`n"
+            $content = $content -replace "block_domain = `"`";", "block_domain = `"`";$extraCode"
+            $content | Set-Content "main/NekoGui.cpp" -Force
+          }
+          if (Test-Path "libs/build_public_res.sh") {
+            (Get-Content "libs/build_public_res.sh" -Raw) -replace "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat", "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" | Set-Content "libs/build_public_res.sh" -Force
+          }
+          if (Test-Path "ui/mainwindow.cpp") {
+            (Get-Content "ui/mainwindow.cpp" -Raw) -replace "https://matsuricom.pages.dev/", "https://autoxtls.github.io/" | Set-Content "ui/mainwindow.cpp" -Force
+          }
+          if (Test-Path "go/grpc_server/update.go") {
+            (Get-Content "go/grpc_server/update.go" -Raw) -replace "https://api.github.com/repos/MatsuriDayo/nekoray/releases", "https://api.github.com/repos/autoxtls/nekoray-windows/releases" | Set-Content "go/grpc_server/update.go" -Force
+          }
+      - name: Install MSVC compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@master  # Updated to master branch
+      - name: Windows - Download Custom Qt ${{ matrix.qt_version }} SDK
+        shell: bash
+        env:
+          DL_QT_VER: ${{ matrix.qt_version }}
+        run: |
+          bash ./libs/download_qtsdk_win.sh
+      - name: Cache Dependencies
+        id: cache-deps
+        uses: actions/cache@v4  # Updated to v4
+        with:
+          path: libs/deps
+          key: DepsCache-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('libs/build_deps_*.sh') }}-Qt${{ matrix.qt_version }}
+      - name: Build Dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        shell: bash
+        run: ./libs/build_deps_all.sh
+      - name: Windows - Generate Makefile and Build
+        shell: bash
+        env:
+          DL_QT_VER: ${{ matrix.qt_version }}
+          CC: cl.exe
+          CXX: cl.exe
+        run: |
+          . ./libs/env_qtsdk.sh "$PWD/qtsdk/Qt"
+          mkdir build
+          cd build
+          cmake -GNinja -DQT_VERSION_MAJOR=6 -DCMAKE_BUILD_TYPE=Release ..
+          ninja -j2
+          cd ..
+          ./libs/deploy_windows64.sh
+      - name: Tar files
+        shell: bash
+        run: tar czvf artifacts.tgz ./deployment
+      - name: Uploading Artifact
+        uses: actions/upload-artifact@v4  # Updated to v4
+        with:
+          name: NekoRay-${{ github.sha }}-${{ matrix.platform }}-${{ matrix.arch }}-Qt${{ matrix.qt_version }}
+          path: artifacts.tgz
+
+  publish:
+    name: Pack & Publish Release
+    if: github.event.inputs.artifact-pack != 'y'
+    runs-on: ubuntu-latest
+    needs:
+      - build-cpp
+      - build-go
+    steps:
+      - name: Checking out sources
+        uses: actions/checkout@v4  # Updated to v4
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4  # Updated to v4
+        with:
+          path: download-artifact
+      - name: Pack
+        shell: bash
+        run: |
+          curl -Lo ghr.tar.gz https://github.com/tcnksm/ghr/releases/download/v0.16.2/ghr_v0.16.2_linux_amd64.tar.gz
+          tar xzf ghr.tar.gz
+          mv ghr_v0.16.2_linux_amd64/ghr .
+          chmod +x ghr
+          . ./libs/env_deploy.sh
+          find download-artifact -name 'artifacts.tgz' -exec tar xzf {} -C deployment \;
+          cd deployment
+          cp -r public_res/* windows64
+          rm -rf public_res *.pdb
+          mv windows64 nekoray
+          zip -r "$version_standalone-windows64.zip" nekoray
+          rm -rf nekoray
+      - name: Clean Up
+        shell: bash
+        run: |
+          cd deployment
+          rm -rf windows64 public_res *.pdb
+      - name: Uploading Artifact
+        uses: actions/upload-artifact@v4  # Updated to v4
+        with:
+          name: Deployment-${{ github.sha }}
+          path: deployment
+      - name: Release
+        shell: bash
+        run: |
+          latest_tag=$(curl -s https://api.github.com/repos/MatsuriDayo/nekoray/tags | jq -r '.[0].name')
+          ./ghr -delete -t "${{ secrets.NEKORAY_WORKFLOW_TOKEN }}" -n "$latest_tag" -b "Built on the original repository." "$latest_tag" deployment
