@@ -26,23 +26,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checking out sources
-        uses: actions/checkout@v4  # Updated to v4 for consistency
+        uses: actions/checkout@v4
 
       - name: Go Status
         run: git ls-files go | xargs cat | sha1sum > go_status
 
       - name: Cache Common Download
         id: cache-common
-        uses: actions/cache@v4  # Updated to v4
+        uses: actions/cache@v4
         with:
           path: artifacts.tgz
-          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('libs/*.sh', 'go_status', '*.txt') }}
+          key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('go.mod', 'libs/*.sh', '*.txt') }}  # Use go.mod instead
 
       - name: Install Golang
         if: steps.cache-common.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5  # Updated to v5
+        uses: actions/setup-go@v5
         with:
-          go-version: ^1.24  # Xray-core v25.3.6 requires Go 1.24+
+          go-version: ^1.24
 
       - name: Download Latest Xray-core Source
         if: steps.cache-common.outputs.cache-hit != 'true'
@@ -65,10 +65,11 @@ jobs:
           GOARCH: ${{ matrix.cross_arch }}
         run: |
           if [ "${{ matrix.cross_os }}" != "public_res" ]; then
-            cp -r xray-core/* .
+            cd xray-core  # Change to correct directory for go build
             CGO_ENABLED=0 go build -o xray -trimpath -ldflags "-s -w -buildid=" ./main
+            cd ..
             mkdir -p deployment/${{ matrix.cross_os }}_${{ matrix.cross_arch }}
-            mv xray deployment/${{ matrix.cross_os }}_${{ matrix.cross_arch }}/xray
+            mv xray-core/xray deployment/${{ matrix.cross_os }}_${{ matrix.cross_arch }}/xray
             ./libs/build_go.sh
           else
             ./libs/build_public_res.sh
@@ -91,7 +92,7 @@ jobs:
           - platform: windows-2022
             arch: x64
             qt_version: "6.7"
-          - platform: ubuntu-22.04  # Updated from ubuntu-20.04
+          - platform: ubuntu-22.04
             arch: x64
             qt_version: "5.12"
       fail-fast: false
@@ -100,7 +101,7 @@ jobs:
       ACTIONS_ALLOW_UNSECURE_COMMANDS: true
     steps:
       - name: Checking out sources
-        uses: actions/checkout@v4  # Updated to v4
+        uses: actions/checkout@v4
         with:
           submodules: "recursive"
 
@@ -119,14 +120,20 @@ jobs:
         run: bash ./libs/download_qtsdk_win.sh
 
       - name: Install ninja-build tool
-        uses: seanmiddleditch/gha-setup-ninja@v4  # Updated to v4
+        uses: seanmiddleditch/gha-setup-ninja@v4
 
       - name: Cache Download
         id: cache-deps
-        uses: actions/cache@v4  # Updated to v4
+        uses: actions/cache@v4
         with:
           path: libs/deps
           key: DepsCache-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('libs/build_deps_*.sh') }}-Qt${{ matrix.qt_version }}
+
+      - name: Ensure Scripts Are Executable
+        run: |
+          chmod +x ./libs/build_deps_all.sh || echo "build_deps_all.sh not found, skipping"
+          chmod +x ./libs/deploy_windows64.sh || echo "deploy_windows64.sh not found, skipping"
+          chmod +x ./libs/deploy_linux64.sh || echo "deploy_linux64.sh not found, skipping"
 
       - name: Build Dependencies
         shell: bash
@@ -188,12 +195,18 @@ jobs:
       - build-go
     steps:
       - name: Checking out sources
-        uses: actions/checkout@v4  # Updated to v4
+        uses: actions/checkout@v4
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           path: download-artifact
+
+      - name: Ensure Scripts Are Executable
+        run: |
+          chmod +x ./libs/env_deploy.sh || echo "env_deploy.sh not found, skipping"
+          chmod +x ./libs/package_debian.sh || echo "package_debian.sh not found, skipping"
+          chmod +x ./libs/package_appimage.sh || echo "package_appimage.sh not found, skipping"
 
       - name: Pack
         run: |
