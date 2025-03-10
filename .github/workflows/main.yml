@@ -11,6 +11,10 @@ on:
       artifact-pack:
         description: 'artifact-pack: If want ignore'
         required: false
+      xray_version:
+        description: 'Xray-core version (e.g., v1.8.23). Leave blank for latest.'
+        required: false
+        default: ''
 
 jobs:
   build-go:
@@ -25,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checking out sources
-        uses: actions/checkout@v4  # Updated to v4
+        uses: actions/checkout@v4
         with:
           repository: MatsuriDayo/nekoray
           ref: main
@@ -51,21 +55,37 @@ jobs:
         run: git ls-files go | xargs cat | sha1sum > go_status
       - name: Cache Common Download
         id: cache-common
-        uses: actions/cache@v4  # Updated to v4
+        uses: actions/cache@v4
         with:
           path: artifacts.tgz
           key: CommonCache-${{ matrix.cross_os }}-${{ matrix.cross_arch }}-${{ hashFiles('libs/*.sh', 'go_status', '*.txt') }}
       - name: Install Golang
         if: steps.cache-common.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5  # Updated to v5
+        uses: actions/setup-go@v5
         with:
           go-version: '^1.21'
+      - name: Fetch Custom Xray-core Version
+        if: steps.cache-common.outputs.cache-hit != 'true' && github.event.inputs.xray_version != ''
+        shell: bash
+        run: |
+          XRAY_VERSION=${{ github.event.inputs.xray_version }}
+          echo "Fetching Xray-core version $XRAY_VERSION"
+          mkdir -p deployment/xray
+          curl -L "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-windows-64.zip" -o xray.zip
+          unzip xray.zip -d deployment/xray
+          rm xray.zip
+          mv deployment/xray/xray.exe deployment/
+          rm -rf deployment/xray
       - name: Build golang parts
         if: steps.cache-common.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          XRAY_VERSION: ${{ github.event.inputs.xray_version }}
         run: |
           if [ "${{ matrix.cross_os }}" != "public_res" ]; then
-            ./libs/get_source.sh
+            if [ -z "$XRAY_VERSION" ]; then
+              ./libs/get_source.sh  # Use default version if no custom version specified
+            fi
             GOOS=${{ matrix.cross_os }} GOARCH=${{ matrix.cross_arch }} ./libs/build_go.sh
           else
             ./libs/build_public_res.sh
@@ -75,21 +95,22 @@ jobs:
         shell: bash
         run: tar czvf artifacts.tgz ./deployment
       - name: Uploading Artifact
-        uses: actions/upload-artifact@v4  # Updated to v4
+        uses: actions/upload-artifact@v4
         with:
           name: NekoRay-${{ github.sha }}-Common-${{ matrix.cross_os }}-${{ matrix.cross_arch }}
           path: artifacts.tgz
+
   publish:
     name: Pack & Publish Release
     if: github.event.inputs.artifact-pack != 'y'
     runs-on: ubuntu-latest
     needs:
-      - build-go
+      - build-go  # Updated to depend only on build-go
     steps:
       - name: Checking out sources
-        uses: actions/checkout@v4  # Updated to v4
+        uses: actions/checkout@v4
       - name: Download Artifacts
-        uses: actions/download-artifact@v4  # Updated to v4
+        uses: actions/download-artifact@v4
         with:
           path: download-artifact
       - name: Pack
@@ -100,9 +121,10 @@ jobs:
           mv ghr_v0.16.2_linux_amd64/ghr .
           chmod +x ghr
           . ./libs/env_deploy.sh
+          mkdir -p deployment  # Ensure deployment directory exists
           find download-artifact -name 'artifacts.tgz' -exec tar xzf {} -C deployment \;
           cd deployment
-          cp -r public_res/* windows64
+          cp -r public_res/* windows64 || echo "No public_res directory found, skipping cp"
           rm -rf public_res *.pdb
           mv windows64 nekoray
           zip -r "$version_standalone-windows64.zip" nekoray
@@ -113,7 +135,7 @@ jobs:
           cd deployment
           rm -rf windows64 public_res *.pdb
       - name: Uploading Artifact
-        uses: actions/upload-artifact@v4  # Updated to v4
+        uses: actions/upload-artifact@v4
         with:
           name: Deployment-${{ github.sha }}
           path: deployment
