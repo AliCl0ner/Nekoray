@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checking out sources
         uses: actions/checkout@v4
+      - name: Set execute permissions for scripts
+        run: chmod +x ./libs/get_source.sh ./libs/build_go.sh ./libs/build_public_res.sh
       - name: Go Status
         run: git ls-files go | xargs cat | sha1sum > go_status
       - name: Cache Common Download
